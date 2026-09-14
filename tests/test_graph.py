@@ -655,7 +655,7 @@ def main() -> int:
     ):
         state, llm, _, events = run(cfg, "Почему заказ опаздывает?", {
             "intent+entities": {"intent": "ORDER_DELAY_EXPLANATION", "entities": {},
-                                "ambiguity": ambiguity,
+                                "ambiguity": ambiguity, "scope": "order",
                                 "reason_summary": "вопрос о задержке"},
         }, runs)
         check(f"уточнение задано — {label}", state.status == "clarify", state.status)
@@ -663,6 +663,32 @@ def main() -> int:
         check(f"инструменты не вызывались — {label}", not state.evidence)
         check(f"дорогие модели не тронуты — {label}",
               {r for r, _ in llm.calls} == {"M_fast"}, str({r for r, _ in llm.calls}))
+
+    # Обратная сторона: вопрос об устройстве системы номера заказа не требует,
+    # даже если класс вопроса обычно его подразумевает. «Нужен ли здесь номер» —
+    # свойство вопроса, а не набора сущностей, и решить это может только модель.
+    # Раньше вместо её суждения стоял признак «сущностей нет вообще» — грубая
+    # замена, отправлявшая общий вопрос в уточнение.
+    state, llm, _, events = run(cfg, "Почему заказы вообще опаздывают?", {
+        "intent+entities": {"intent": "ORDER_DELAY_EXPLANATION", "entities": {},
+                            "ambiguity": {"is_ambiguous": False, "question": None},
+                            "scope": "system", "reason_summary": "вопрос о логике сроков"},
+        "collect_evidence": [("search_regulations", {"stage": "экструзия"})],
+        "evidence_sufficiency": {"enough": True, "missing_sources": [], "gaps": [],
+                                 "reason_summary": "нормы прочитаны"},
+        "cross_source_check": {"status": "confirmed", "confidence": 0.8,
+                               "conflicts": [], "reason_summary": "ок"},
+        "generate_answer": {"summary": "Сроки считаются по нормативу выработки.",
+                            "explanation": "Норматив задан регламентом.",
+                            "cited_locators": [], "confidence": "средняя"},
+        "verify_answer": {"ok": True, "unsupported": [], "verdict_summary": "ок"},
+    }, runs)
+    check("вопрос об устройстве не требует номера заказа",
+          state.status != "clarify", state.status)
+    check("до сбора фактов дело дошло", bool(state.evidence), str(len(state.evidence)))
+    check("выбор записан в трассу и проверяем",
+          any(e.get("scope") == "system" for e in events),
+          "в трассе должен быть scope")
 
     print("\nПустой отказ объясняет, что делать дальше")
     # Тот же прогон напечатал «Что удалось проверить:» и под ним одно пустое тире:

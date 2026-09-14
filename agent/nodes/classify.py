@@ -43,6 +43,9 @@ def classify(state: AgentState, deps: Deps) -> dict:
 
     entities = {k: v for k, v in (data.get("entities") or {}).items() if v is not None}
     ambiguity = data.get("ambiguity") or {"is_ambiguous": False, "question": None}
+    # По умолчанию считаем вопрос относящимся к заказу: пропущенное уточнение
+    # дешевле придуманного ответа о несуществующем заказе.
+    scope = data.get("scope") or "order"
     route = cfg.route_for(data.get("intent") or "GENERAL_LOGIC_EXPLANATION")
 
     updates = {
@@ -59,7 +62,7 @@ def classify(state: AgentState, deps: Deps) -> dict:
                    reason_summary=data.get("reason_summary", ""),
                    intent=route["intent"], entities=entities, role=route["role"],
                    companion_role=route["companion_role"],
-                   required_sources=route["required_sources"])
+                   required_sources=route["required_sources"], scope=scope)
 
     # Проверка работает в обе стороны и не зависит от флага модели. Первый
     # прогон дал «Где находится заказ Z-1001?» в ветке уточнения при извлечённом
@@ -83,13 +86,24 @@ def classify(state: AgentState, deps: Deps) -> dict:
     # Правило простое: нет ни одной зацепки — спрашиваем. Формулировку берём у
     # модели, если она её дала, иначе составляем сами: вопрос должен быть один и
     # тот же от прогона к прогону.
-    if missing and not entities:
+    # «Нужен ли здесь номер заказа» — вопрос о природе запроса, и решить его
+    # может только модель: «почему заказ опаздывает» и «почему заказы вообще
+    # опаздывают» отличаются не набором сущностей, а тем, о чём спрашивают.
+    # Раньше вместо этого стоял признак «сущностей нет вообще» — грубая замена:
+    # вопрос об устройстве системы, не назвавший ни этапа, ни таблицы, он
+    # отправлял в уточнение, а спрашивать там нечего.
+    #
+    # Но РЕШЕНИЕ по этому ответу принимает код. Модель говорит, о чём вопрос;
+    # что с этим делать — определяют маршрут и наличие сущностей. Так суждение
+    # остаётся у модели, а поведение — воспроизводимым.
+    about_order = scope != "system"
+    if missing and not entities and about_order:
         question = (ambiguity.get("question")
                     or ENTITY_QUESTIONS.get(missing[0],
                                             "Уточните, о каком объекте идёт речь."))
         trace.decision(node="classify", action="clarify_forced",
                        reason_summary="ключевая сущность не названа ни в каком виде",
-                       missing_entities=missing,
+                       missing_entities=missing, scope=scope,
                        model_flagged=bool(ambiguity.get("is_ambiguous")))
         updates["status"] = "clarify"
         updates["answer"] = question
