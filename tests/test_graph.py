@@ -638,6 +638,50 @@ def main() -> int:
     check("причина остановки названа в состоянии",
           state.limited_by == "повтор_пробела", str(state.limited_by))
 
+    print("\nВопрос без единой зацепки уходит в уточнение")
+    # Живой прогон 14.09, «Почему заказ опаздывает?». Модель объявила вопрос
+    # неоднозначным, но вопроса не сформулировала — и открылась щель: ветка
+    # принудительного уточнения требовала, чтобы флаг был опущен, а ветка ответа
+    # на флаг требовала формулировки. Не сработала ни одна. Прогон пошёл дальше
+    # без номера заказа, модель подставила в него имя файла задания и честно
+    # выяснила, что заказа «input_task_1» нигде нет.
+    for label, ambiguity in (
+        ("модель промолчала о неоднозначности",
+         {"is_ambiguous": False, "question": None}),
+        ("модель подняла флаг, но вопроса не дала",
+         {"is_ambiguous": True, "question": None}),
+        ("модель подняла флаг и дала свой вопрос",
+         {"is_ambiguous": True, "question": "О каком заказе речь?"}),
+    ):
+        state, llm, _, events = run(cfg, "Почему заказ опаздывает?", {
+            "intent+entities": {"intent": "ORDER_DELAY_EXPLANATION", "entities": {},
+                                "ambiguity": ambiguity,
+                                "reason_summary": "вопрос о задержке"},
+        }, runs)
+        check(f"уточнение задано — {label}", state.status == "clarify", state.status)
+        check(f"вопрос не пустой — {label}", bool(state.answer.strip()), state.answer)
+        check(f"инструменты не вызывались — {label}", not state.evidence)
+        check(f"дорогие модели не тронуты — {label}",
+              {r for r, _ in llm.calls} == {"M_fast"}, str({r for r, _ in llm.calls}))
+
+    print("\nПустой отказ объясняет, что делать дальше")
+    # Тот же прогон напечатал «Что удалось проверить:» и под ним одно пустое тире:
+    # факты были — два промаха «заказа нет», — но координаты у них пустые.
+    state, _, _, _ = run(cfg, "Почему заказ Z-1060 не поставлен на линию ЛП2?", {
+        "intent+entities": CLASSIFY_Z1060,
+        "collect_evidence": [("read_task", {"order_number": "НЕТ-ТАКОГО"})],
+        "evidence_sufficiency": {"enough": False, "missing_sources": [], "gaps": [],
+                                 "reason_summary": "пусто"},
+        "cross_source_check": {"status": "insufficient", "confidence": 0.1,
+                               "conflicts": [], "reason_summary": "нечем"},
+    }, runs)
+    check("пустых пунктов в ответе нет",
+          "\n- \n" not in state.answer and not state.answer.rstrip().endswith("-"),
+          repr(state.answer[-120:]))
+    check("сказано, что делать дальше",
+          "Уточните вопрос" in state.answer or "Чего не хватило" in state.answer,
+          state.answer[-160:])
+
     print("\nПридуманная неоднозначность")
     state, llm, _, events = run(cfg, "Где находится заказ Z-1001?", {
         "intent+entities": {"intent": "ORDER_LOOKUP",

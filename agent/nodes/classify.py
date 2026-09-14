@@ -72,13 +72,25 @@ def classify(state: AgentState, deps: Deps) -> dict:
     # может, и требовать его значит не ответить на исправно заданный вопрос.
     # Отсутствие ключевой сущности при наличии других — повод читать шире, а не
     # переспрашивать.
-    if missing and not entities and not ambiguity.get("is_ambiguous"):
-        question = ENTITY_QUESTIONS.get(missing[0],
-                                        "Уточните, о каком объекте идёт речь.")
+    # Флаг модели здесь НЕ участвует, и это не упрощение, а починка. Раньше
+    # условие требовало `not ambiguity["is_ambiguous"]`, и открывалась щель:
+    # модель объявляла вопрос неоднозначным, но вопроса не формулировала. Тогда
+    # эта ветка не срабатывала (флаг поднят), следующая тоже (вопроса нет) — и
+    # прогон уходил дальше без ключевой сущности. Живой прогон 14.09 на «Почему
+    # заказ опаздывает?» провалился ровно так: модель подставила в номер заказа
+    # имя файла задания и честно выяснила, что заказа «input_task_1» нигде нет.
+    #
+    # Правило простое: нет ни одной зацепки — спрашиваем. Формулировку берём у
+    # модели, если она её дала, иначе составляем сами: вопрос должен быть один и
+    # тот же от прогона к прогону.
+    if missing and not entities:
+        question = (ambiguity.get("question")
+                    or ENTITY_QUESTIONS.get(missing[0],
+                                            "Уточните, о каком объекте идёт речь."))
         trace.decision(node="classify", action="clarify_forced",
-                       reason_summary="ключевая сущность не названа, "
-                                      "модель этого не заметила",
-                       missing_entities=missing)
+                       reason_summary="ключевая сущность не названа ни в каком виде",
+                       missing_entities=missing,
+                       model_flagged=bool(ambiguity.get("is_ambiguous")))
         updates["status"] = "clarify"
         updates["answer"] = question
         updates["ambiguity"] = {"is_ambiguous": True, "question": question}

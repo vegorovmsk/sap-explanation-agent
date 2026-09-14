@@ -28,13 +28,28 @@ def insufficient(state: AgentState, deps: Deps) -> dict:
         lines.append(f"Сбор фактов остановлен по ограничению: {state.limited_by}.")
     if state.gaps:
         lines += ["", "Чего не хватило:"] + [f"- {g}" for g in state.gaps[:6]]
-    if state.evidence:
-        lines += ["", "Что удалось проверить:"]
-        seen: list[str] = []
-        for e in state.evidence:
-            if e.locator not in seen:
-                seen.append(e.locator)
-        lines += [f"- {loc}" for loc in seen[:8]]
+    # Координаты без значения в список не идут. Живой прогон 14.09 напечатал
+    # «Что удалось проверить:» и под ним одно пустое тире: факты были — два
+    # промаха вида «заказа нет», — но координаты у них пустые, потому что искали
+    # несуществующий объект. Пустой пункт хуже отсутствующего раздела: он
+    # выглядит как оборванный вывод.
+    seen: list[str] = []
+    for e in state.evidence:
+        if e.locator and e.locator not in seen:
+            seen.append(e.locator)
+    if seen:
+        lines += ["", "Что удалось проверить:"] + [f"- {loc}" for loc in seen[:8]]
+
+    if not seen and not state.gaps:
+        # Совсем пустой отказ бесполезен: человек не знает ни что случилось, ни
+        # что делать дальше. Сказать нечего — значит, надо сказать хотя бы это.
+        tried = {f["инструмент"] for f in state.failed_calls}
+        lines += ["", "Ни один источник не дал подтверждённых фактов."]
+        if tried:
+            lines.append("Не удались вызовы: " + ", ".join(sorted(tried)) + ".")
+        lines.append("Уточните вопрос — например, назовите номер заказа, "
+                     "линию или этап.")
+
     lines += ["", "Уверенность: низкая",
               "Нужно обращение в поддержку: нет (недостаточно данных для формулировки)"]
     deps.trace.decision(node="insufficient", action="report_gap",
