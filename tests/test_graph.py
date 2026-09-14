@@ -695,6 +695,84 @@ def main() -> int:
     check("карта не выдаётся за доказательство",
           all("диаметр" not in e.claim.lower() or e.locator for e in state.evidence))
 
+    print("\nОговорка не выдаёт мнение рецензента за механический вердикт")
+    # Живой прогон 14.09 на общем вопросе: под ответом «Уверенность: высокая», а
+    # сразу под ним «часть утверждений не подтверждена источниками» со списком
+    # ВСЕХ ключевых утверждений — каждое с координатой из доказательной базы и
+    # прошедшее механическую сверку. Ответ опровергал сам себя, причём неправдиво.
+    disputed = {
+        "ok": False,
+        "unsupported": [{"claim": "Этап печати подбирает линию из допустимых",
+                         "severity": "второстепенное",
+                         "checked_facts": [1, 2]}],
+        "verdict_summary": "не нашёл подтверждения",
+    }
+    state, llm, _, events = run(cfg, "Почему заказ Z-1060 не поставлен на линию ЛП2?", {
+        "intent+entities": CLASSIFY_Z1060,
+        "collect_evidence": TOOLS_Z1060[:2],
+        "evidence_sufficiency": {"enough": True, "missing_sources": [], "gaps": [],
+                                 "reason_summary": "хватит"},
+        "cross_source_check": {"status": "confirmed", "confidence": 0.9, "conflicts": [],
+                               "reason_summary": "ок"},
+        "generate_answer": ANSWER_OK,
+        "verify_answer": disputed,
+    }, runs)
+    check("механика названа пройденной, раз координаты чисты",
+          "механическая сверка координат пройдена" in state.answer,
+          state.answer[-260:])
+    check("замечание подано как несогласие рецензента, а не как факт",
+          "не подтверждена источниками" not in state.answer)
+    check("спорное утверждение всё равно показано пользователю",
+          "Этап печати подбирает линию из допустимых" in state.answer)
+
+    # А вот механическое нарушение — это проверенный кодом факт, и говорить о нём
+    # надо твёрдо: тут формулировка остаётся жёсткой.
+    state2, _, _, _ = run(cfg, "Почему заказ Z-1060 не поставлен на линию ЛП2?", {
+        "intent+entities": CLASSIFY_Z1060,
+        "collect_evidence": TOOLS_Z1060[:2],
+        "evidence_sufficiency": {"enough": True, "missing_sources": [], "gaps": [],
+                                 "reason_summary": "хватит"},
+        "cross_source_check": {"status": "confirmed", "confidence": 0.9, "conflicts": [],
+                               "reason_summary": "ок"},
+        "generate_answer": {"summary": "Заказ на ЛП1.",
+                            "explanation": "Так предписано [ТР-ВЫДУМКА-2026 п. 9.9].",
+                            "cited_locators": [], "confidence": "высокая"},
+        "generate_answer:no_invented_locators": {
+            "summary": "Заказ на ЛП1.",
+            "explanation": "Так предписано [ТР-ВЫДУМКА-2026 п. 9.9].",
+            "cited_locators": [], "confidence": "высокая"},
+        "verify_answer": {"ok": True, "unsupported": [], "verdict_summary": "ок"},
+    }, runs)
+    check("при выдуманной ссылке формулировка остаётся твёрдой",
+          "не подтверждена источниками" in state2.answer
+          or "вычеркнут" in state2.answer, state2.answer[-200:])
+
+    print("\nИтоговая строка не судит решение там, где решения нет")
+    # «Какие этапы планирования есть в системе?» — вопрос об устройстве. Живой
+    # прогон отвечал на него «Вывод: решение системы соответствует регламенту и
+    # реализации расчёта», хотя никакого решения не разбирал.
+    from agent.prompts.answer import verdict_line, about_decision   # noqa: E402
+    from agent.state import AgentState as _AS                       # noqa: E402
+
+    def _st(status, entities, seen):
+        x = _AS(question="q", task_file="t")
+        x.status, x.entities, x.sources_seen = status, entities, seen
+        return x
+
+    general = _st("confirmed", {}, ["regulations", "code"])
+    check("вопрос об устройстве решением не считается", not about_decision(general))
+    check("итог описывает источники, а не одобряет решение",
+          "решение системы" not in verdict_line(general)
+          and "описание собрано" in verdict_line(general), verdict_line(general))
+    decided = _st("confirmed", {"order_number": "Z-1060"}, ["plan", "nsi", "regulations"])
+    check("разбор решения по-прежнему говорит о решении",
+          verdict_line(decided).startswith("решение системы соответствует"),
+          verdict_line(decided))
+    conflict_general = _st("conflict", {}, ["regulations", "code"])
+    check("расхождение без заказа говорит о реализации, а не о решении",
+          "реализация расходится" in verdict_line(conflict_general),
+          verdict_line(conflict_general))
+
     print("\nСбой модели-судьи не уносит с собой весь прогон")
     # Прогон 14.09 потерял два кейса из девятнадцати со статусом `error`: модель
     # упёрлась в потолок токенов, починка не помогла, узел бросил

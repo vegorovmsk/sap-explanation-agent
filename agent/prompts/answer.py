@@ -66,16 +66,50 @@ VERDICT_SOURCES = {
 }
 
 
+def about_decision(state: AgentState) -> bool:
+    """Идёт ли речь о конкретном решении системы, а не об её устройстве.
+
+    Решение есть там, где есть заказ: его куда-то поставили, отложили или сняли.
+    Вопрос «какие этапы планирования есть в системе» решения не содержит — там
+    нечего одобрять или оспаривать. Живой прогон показал, во что превращается
+    смешение: на такой вопрос агент отвечал «Вывод: решение системы соответствует
+    регламенту и реализации расчёта», хотя никакого решения не разбирал.
+    """
+    return bool(state.entities.get("order_number")) or "plan" in state.sources_seen
+
+
 def verdict_line(state: AgentState) -> str:
+    """Итоговая строка целиком, вместе с подлежащим.
+
+    Подлежащее зависит от вопроса: у разбора решения это «решение системы», у
+    вопроса об устройстве — сама реализация. Собирать строку из общего начала и
+    переменного конца нельзя: начало здесь и есть то, что меняется.
+    """
+    decision = about_decision(state)
+    subject = "решение системы" if decision else "реализация"
+
+    if state.status == "conflict":
+        return ("решение системы противоречит документации — подготовлено обращение "
+                "в поддержку" if decision else
+                "реализация расходится с документацией — подготовлено обращение "
+                "в поддержку")
     if state.status != "confirmed":
-        return STATUS_LINE.get(state.status, state.status)
+        tail = STATUS_LINE.get(state.status, state.status)
+        return (f"{subject} {tail}" if decision
+                else "объяснить по доступным данным не удалось")
+
     named = [VERDICT_SOURCES[s] for s in VERDICT_SOURCES if s in state.sources_seen
              and s not in ("plan", "task")]
+    if not decision:
+        # Ответ про устройство ничего не одобряет: он говорит, по каким
+        # источникам собрано описание.
+        where = ", ".join(named) if named else "собранным фактам"
+        return f"описание собрано по источникам: {where}"
     if not named:
-        return "подтверждается собранными фактами"
+        return f"{subject} подтверждается собранными фактами"
     if len(named) == 1:
-        return f"соответствует {named[0]}"
-    return "соответствует " + ", ".join(named[:-1]) + f" и {named[-1]}"
+        return f"{subject} соответствует {named[0]}"
+    return f"{subject} соответствует " + ", ".join(named[:-1]) + f" и {named[-1]}"
 
 
 def allowed_block(state: AgentState) -> str:
@@ -163,7 +197,7 @@ def render(state: AgentState) -> str:
     if not seen:
         parts.append("- нет")
     parts += ["", "Объяснение:", state.answer_explanation, ""]
-    parts.append(f"Вывод: решение системы {verdict_line(state)}.")
+    parts.append(f"Вывод: {verdict_line(state)}.")
     parts.append(f"Уверенность: {state.confidence_label}")
     parts.append("Нужно обращение в поддержку: " + ("да" if state.ticket else "нет"))
     if state.gaps:
