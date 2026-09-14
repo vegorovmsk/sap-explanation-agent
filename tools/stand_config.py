@@ -24,19 +24,36 @@ from core.config import Config
 from tools.base import ToolResult
 from tools.errors import ToolAccessError, ToolNotFound
 
-# Разделы, которые имеет смысл спрашивать. Остальное — внутренняя кухня расчёта.
-SECTIONS = {
-    "service_years": "служебные годы готовности",
-    "pseudo_lines": "псевдо-линии неразмещённых партий",
-    "input_files": "состав нормативно-справочной информации",
-    "column_translation": "соответствие колонок задания полям расчёта",
-    "assortment_mapping": "группы ассортимента",
-    "valid_assortment": "допустимые виды и типы",
-    "valid_divisions": "допустимые подразделения",
-    "operations_mapping": "типы переходов",
-    "shift_hours": "продолжительность смены",
-}
+# Раньше здесь лежал список из девяти разделов с моими пояснениями: «служебные
+# годы готовности», «псевдо-линии неразмещённых партий». Два изъяна, и оба
+# принципиальные. Во-первых, пояснения уходили модели как «о чём» — то есть
+# агент показывал пользователю МОИ формулировки вместо того, что сказала о себе
+# сама система. Во-вторых, список работал как белый: раздела, которого я не
+# предусмотрел, для агента не существовало, и на другом стенде он ослеп бы на
+# всё незнакомое.
+#
+# Разделы теперь берутся из самого файла, а объяснение — из комментария, который
+# стенд написал над ключом. Если комментария нет, честнее показать пустоту, чем
+# мою догадку: пустое поле видно, а выдуманное объяснение выглядит как знание.
+
 CONTEXT_LINES = 6      # сколько строк комментария над ключом попадает в выдачу
+
+
+def _own_comment(lines: list[str], key: str) -> str:
+    """Что стенд сам написал о разделе — комментарий над ключом, без моих слов."""
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"{key}:")), None)
+    if start is None:
+        return ""
+    # Только то, что написано НАД ключом: комментарии внутри блока поясняют
+    # отдельные строки, а не раздел целиком, и в сводке выглядят бессмыслицей.
+    said: list[str] = []
+    i = start - 1
+    while i >= 0 and lines[i].lstrip().startswith("#") and start - i <= CONTEXT_LINES:
+        text = lines[i].lstrip("# ").strip()
+        if text and not set(text) <= {"=", "-", "─"}:      # рамки-разделители
+            said.insert(0, text)
+        i -= 1
+    return " ".join(said)[:200]
 
 
 def _block(lines: list[str], key: str) -> tuple[int, int, str] | None:
@@ -84,8 +101,8 @@ def read_stand_config(cfg: Config, *, section: str | None = None) -> ToolResult:
         raise ToolAccessError(f"Конфиг стенда не разбирается: {exc}") from exc
 
     if not section:
-        available = [{"раздел": k, "о чём": SECTIONS.get(k, ""), "есть_в_файле": k in data}
-                     for k in SECTIONS]
+        available = [{"раздел": k, "о чём": _own_comment(lines, k)}
+                     for k in data if isinstance(k, str)]
         return ToolResult(
             tool="read_stand_config",
             payload={"файл": path.name, "разделы": available,
@@ -97,7 +114,7 @@ def read_stand_config(cfg: Config, *, section: str | None = None) -> ToolResult:
     if section not in data:
         raise ToolNotFound(
             f"В конфиге стенда нет раздела «{section}»",
-            hint="Доступные разделы: " + ", ".join(k for k in SECTIONS if k in data))
+            hint="Доступные разделы: " + ", ".join(str(k) for k in data))
 
     found = _block(lines, section)
     first, last, fragment = found if found else (1, len(lines), "")
@@ -105,7 +122,7 @@ def read_stand_config(cfg: Config, *, section: str | None = None) -> ToolResult:
     return ToolResult(
         tool="read_stand_config",
         payload={"файл": path.name, "раздел": section,
-                 "о чём": SECTIONS.get(section, ""),
+                 "о чём": _own_comment(lines, section),
                  "значения": data[section],
                  # Смысл значений стенд объясняет комментарием, а YAML-разбор
                  # комментарии теряет. Поэтому отдаём и сам фрагмент файла.

@@ -121,6 +121,7 @@ class StandPaths:
     shared_code: list[str]     # предобработка и проверки НСИ
     report_only_code: list[str]  # выгрузка и генераторы: решений не принимают
     service_years: dict        # служебный год готовности → что он означает
+    column_map_section: str    # раздел конфига стенда с соответствием колонок
 
     def result_for(self, task_file: str) -> Path:
         return self.results_dir / self.result_pattern.format(task_stem=Path(task_file).stem)
@@ -192,6 +193,7 @@ class Config:
             shared_code=list(s.get("shared_code") or []),
             report_only_code=list(s.get("report_only_code") or []),
             service_years=_stand_service_years(root / s["config_file"]),
+            column_map_section=s.get("column_map_section") or "column_translation",
         )
 
     # ------------------------------------------------------------------ модели

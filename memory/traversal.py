@@ -155,8 +155,13 @@ def params_for(cfg) -> dict[str, dict[str, tuple[str, ...]]]:
     try:
         import yaml
 
+        # Имя раздела — допущение о наблюдаемой системе, и оно объявлено в
+        # config/settings.yaml рядом с остальными. В коде агента такому знанию
+        # не место: перенастройка на другую систему должна быть правкой конфига,
+        # а не правкой исходников.
+        section = getattr(cfg.stand, "column_map_section", "") or "column_translation"
         with open(cfg.stand.config_file, encoding="utf-8") as fh:
-            translation = (yaml.safe_load(fh) or {}).get("column_translation") or {}
+            translation = (yaml.safe_load(fh) or {}).get(section) or {}
     except (OSError, ValueError, AttributeError):
         translation = {}
 
