@@ -47,6 +47,37 @@ def main() -> int:
     def call(tool, **args):
         return execute(tool, args, cfg=cfg, trace=current)
 
+    print("\nОпечатка в значении из закрытого списка")
+    # Живой прогон 14.09, вопрос «какие этапы планирования есть в системе»: модель
+    # поступила правильно — опросила регламенты всех трёх этапов по очереди, — но
+    # написала «эструзия». Схема отвергла значение, экструзия выпала из
+    # доказательной базы целиком, и ответ перечислил три этапа, прочитав нормы
+    # только двух. Одна пропущенная буква стоила источника.
+    from tools.registry import _nearest_enum                     # noqa: E402
+    STAGES = ["экструзия", "печать", "кольцевание"]
+    check("пропущенная буква исправляется",
+          _nearest_enum(STAGES, "эструзия") == "экструзия")
+    check("регистр и падеж тоже",
+          _nearest_enum(STAGES, "ЭКСТРУЗИЯ") == "экструзия"
+          and _nearest_enum(STAGES, "экструзии") == "экструзия")
+    check("верное значение не трогаем",
+          _nearest_enum(STAGES, "кольцевание") is None)
+    check("далёкое слово остаётся ошибкой — гадать нельзя",
+          _nearest_enum(STAGES, "обжиг") is None
+          and _nearest_enum(STAGES, "") is None)
+    check("двусмысленность остаётся ошибкой",
+          _nearest_enum(["альфа", "альфб"], "альфв") is None)
+
+    # Режим «только этап» детерминированный и не поднимает векторную память:
+    # проверяется исправление аргумента, а не поиск.
+    r_fix = call("search_regulations", stage="эструзия")
+    check("вызов с опечаткой доходит до источника", r_fix.status == "ok", r_fix.status)
+    written = [json.loads(x) for x in
+               current.path.read_text(encoding="utf-8").splitlines()]
+    check("исправление видно в трассе, а не сделано молча",
+          any(e.get("kind") == "tool.args_repaired" for e in written),
+          "нужно событие tool.args_repaired")
+
     print("\nread_task")
     r = call("read_task", order_number="Z-1060")
     p = r.payload or {}

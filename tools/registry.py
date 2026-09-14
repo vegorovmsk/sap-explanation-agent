@@ -101,7 +101,55 @@ def _coerce_args(spec: ToolSpec, args: dict) -> dict:
                 out[key] = float(value.replace(",", "."))
             except ValueError:
                 pass
+        fixed = _nearest_enum((props.get(key) or {}).get("enum"), out.get(key))
+        if fixed is not None:
+            out[key] = fixed
     return out
+
+
+def _nearest_enum(allowed, value):
+    """Опечатка в значении из закрытого списка — исправить, а не отвергнуть.
+
+    Живой прогон 14.09, вопрос «какие этапы планирования есть в системе»: модель
+    поступила правильно — опросила регламенты всех трёх этапов по очереди, — но в
+    первом вызове написала «эструзия». Схема отвергла значение, экструзия выпала
+    из доказательной базы целиком, и ответ перечислил три этапа, прочитав нормы
+    только двух. Рецензент это поймал и был прав.
+
+    Одна пропущенная буква — это опечатка, а не другое намерение. Исправляем
+    только когда кандидат ровно один и он близок: два подходящих значения или
+    далёкое расстояние означают, что мы не знаем, чего хотели, — и тогда честнее
+    вернуть ошибку с перечнем допустимых значений.
+    """
+    if not allowed or not isinstance(value, str) or value in allowed:
+        return None
+
+    def norm(x: str) -> str:
+        return " ".join(str(x).lower().replace("ё", "е").split())
+
+    target = norm(value)
+    exact = [a for a in allowed if norm(a) == target]
+    if exact:
+        return exact[0]
+    limit = 1 if len(target) <= 6 else 2
+    near = [a for a in allowed
+            if isinstance(a, str) and _distance(norm(a), target) <= limit]
+    return near[0] if len(near) == 1 else None
+
+
+def _distance(a: str, b: str) -> int:
+    """Расстояние Левенштейна. Свой десяток строк дешевле зависимости ради него."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > 3:          # заведомо далеко, считать незачем
+        return 99
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i]
+        for j, cb in enumerate(b, start=1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
 
 
 def _validate_args(spec: ToolSpec, args: dict) -> None:
@@ -166,8 +214,19 @@ def execute(name: str, args: dict | None = None, *, cfg: Config, trace=None,
 
     while True:
         try:
-            payload_args = _coerce_args(spec, {k: v for k, v in args.items()
-                                                if k != "client"})
+            raw_args = {k: v for k, v in args.items() if k != "client"}
+            payload_args = _coerce_args(spec, raw_args)
+            # Исправление аргумента не должно быть молчаливым: по трассе обязано
+            # быть видно, что инструмент вызвали не ровно с тем, что попросила
+            # модель. Иначе «эструзия → экструзия» превращается в магию, которую
+            # при разборе прогона не найти.
+            repaired = {k: (raw_args[k], v) for k, v in payload_args.items()
+                        if k in raw_args and raw_args[k] != v}
+            if repaired and trace is not None:
+                trace.event("tool.args_repaired", tool=spec.name,
+                            fixed={k: f"{was!r} → {now!r}"
+                                   for k, (was, now) in repaired.items()},
+                            status="ok")
             _validate_args(spec, payload_args)
             if "client" in args:
                 payload_args["client"] = args["client"]
