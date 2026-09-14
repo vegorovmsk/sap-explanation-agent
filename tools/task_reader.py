@@ -55,6 +55,9 @@ def read_task(cfg: Config, *, order_number: str, task_file: str | None = None) -
             f"Заказа {order_number} нет в задании {path.name}",
             hint=(f"Похожие номера в задании: {', '.join(near)}" if near else
                   "Проверьте номер заказа или файл задания"),
+            # Координата просмотренного источника: отсутствие записи проверяется
+            # открытием того же файла, а без ссылки этот факт нечем подтвердить.
+            source=source,
         )
 
     idx = hits.index[0]

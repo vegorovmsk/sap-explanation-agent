@@ -704,9 +704,29 @@ def main() -> int:
     check("пустых пунктов в ответе нет",
           "\n- \n" not in state.answer and not state.answer.rstrip().endswith("-"),
           repr(state.answer[-120:]))
-    check("сказано, что делать дальше",
+    # Отсутствие записи — факт, и у него есть координата: файл, который
+    # просмотрели целиком. Раньше она терялась, факт выпадал из ответа, и
+    # пользователю предлагали назвать номер заказа, который он только что назвал.
+    check("установленное отсутствие показано с координатой",
+          "Что удалось проверить" in state.answer
+          and "задание" in state.answer, state.answer[-260:])
+    check("координата отсутствия попала в доказательную базу",
+          any(e.locator for e in state.evidence),
+          str([(e.locator, e.claim[:40]) for e in state.evidence]))
+
+    # А вот когда показывать действительно нечего, отказ обязан сказать, что
+    # делать дальше: пустой отказ бесполезен.
+    state, _, _, _ = run(cfg, "Почему заказ Z-1060 не поставлен на линию ЛП2?", {
+        "intent+entities": CLASSIFY_Z1060,
+        "collect_evidence": [],
+        "evidence_sufficiency": {"enough": False, "missing_sources": [], "gaps": [],
+                                 "reason_summary": "пусто"},
+        "cross_source_check": {"status": "insufficient", "confidence": 0.1,
+                               "conflicts": [], "reason_summary": "нечем"},
+    }, runs)
+    check("совсем пустой отказ объясняет, что делать",
           "Уточните вопрос" in state.answer or "Чего не хватило" in state.answer,
-          state.answer[-160:])
+          state.answer[-200:])
 
     print("\nПридуманная неоднозначность")
     state, llm, _, events = run(cfg, "Где находится заказ Z-1001?", {

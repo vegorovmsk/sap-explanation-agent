@@ -57,6 +57,7 @@ def read_logs(cfg: Config, *, order_number: str | None = None, pattern: str | No
             f"В логе {path.name} нет записей по запросу",
             hint="Отсутствие записи — тоже факт: заказ мог не дойти до этапа, "
                  "на котором пишется событие. Проверьте read_plan и read_task.",
+            source=path.name,
         )
 
     events = sorted({h["событие"] for h in hits if h["событие"]})

@@ -87,6 +87,10 @@ def _by_order(cfg, df, path, sheet, source, cols, order_number, stage,
             hint="Проверьте, попал ли заказ во входное задание (read_task) — "
                  "исключённые до оптимизации заказы остаются в результате "
                  "с линией «Отложенные»",
+            # Отсутствие записи — факт, и у него есть координата: лист, который
+            # просмотрели целиком. Без неё факт нечем подтвердить, и он выпадает
+            # из ответа.
+            source=source,
         )
 
     hits = hits.sort_values("ПорядокПП")
@@ -95,6 +99,7 @@ def _by_order(cfg, df, path, sheet, source, cols, order_number, stage,
             f"У заказа {order_number} нет партии на этапе «{stage}»",
             hint="Этапы этого заказа: "
                  + ", ".join(sorted({str(v) for v in hits["Этап"]})),
+            source=source,
         )
     locators, items = [], []
     for idx, row in hits.iterrows():

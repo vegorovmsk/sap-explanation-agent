@@ -239,7 +239,7 @@ def execute(name: str, args: dict | None = None, *, cfg: Config, trace=None,
                 time.sleep(0.4 * attempt)
                 continue
             result = ToolResult(tool=spec.name, status=exc.status, error=str(exc),
-                                hint=exc.hint,
+                                hint=exc.hint, source=getattr(exc, "source", None),
                                 latency_ms=round((time.perf_counter() - t0) * 1000))
             break
         except TypeError as exc:
