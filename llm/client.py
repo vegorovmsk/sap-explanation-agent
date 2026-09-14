@@ -196,6 +196,10 @@ class LLMClient:
                                 int(limits.get("circuit_breaker_cooldown_s", 60)))
         self.unavailable_cooldown_s = float(
             limits.get("model_unavailable_cooldown_s", 900))
+        # Дедлайн починки: короткий запрос, который либо возвращается быстро,
+        # либо не нужен. По умолчанию — треть общего.
+        self.repair_timeout = float(limits.get("repair_timeout_s", 0)
+                                    or max(self.timeout / 2, self.hard_timeout / 3))
         self._clients: dict[str, OpenAI] = {}
         self.spent_usd = 0.0
 
@@ -391,7 +395,7 @@ class LLMClient:
         return resp
 
     # ------------------------------------------------------------- транспорт
-    def _create(self, spec: ModelSpec, payload: dict):
+    def _create(self, spec: ModelSpec, payload: dict, deadline_s: float | None = None):
         """Один запрос к провайдеру под жёстким дедлайном.
 
         Запрос уходит в отдельный поток-демон, а основной ждёт результат не
@@ -401,6 +405,7 @@ class LLMClient:
         общего времени ответа.
         """
         client = self._client(spec)
+        deadline = deadline_s or self.hard_timeout
         box: queue.Queue = queue.Queue(maxsize=1)
 
         def work() -> None:
@@ -412,10 +417,10 @@ class LLMClient:
         threading.Thread(target=work, daemon=True,
                          name=f"llm-{spec.provider}").start()
         try:
-            status, value = box.get(timeout=self.hard_timeout)
+            status, value = box.get(timeout=deadline)
         except queue.Empty:
             raise LLMTimeout(
-                f"Модель {spec.model} не ответила за {self.hard_timeout:.0f} с "
+                f"Модель {spec.model} не ответила за {deadline:.0f} с "
                 f"(жёсткий дедлайн hard_timeout_s)"
             ) from None
         if status == "err":
@@ -423,11 +428,23 @@ class LLMClient:
         return value
 
     def _request(self, spec: ModelSpec, payload: dict, *, purpose: str, role: str) -> LLMResponse:
+        # Починка JSON — запрос особого рода: короткий, с готовым ответом в
+        # контексте и единственной задачей «повтори по схеме». Держать её на
+        # общем дедлайне бессмысленно и дорого. Прогон 14.09, кейс A5: починка
+        # переписанного ответа дважды висела полный жёсткий дедлайн — 240 с
+        # чистого ожидания из 517 с прогона, больше всей остальной работы вместе
+        # взятой. Если короткий запрос не вернулся быстро, он не вернётся
+        # полезным: ждать его столько же, сколько полноценной генерации, — это
+        # платить временем за надежду.
+        is_repair = purpose.endswith(":repair")
+        deadline = self.repair_timeout if is_repair else self.hard_timeout
+        timeout_budget = 0 if is_repair else self.timeout_retries
+
         attempt, last_exc, timeouts = 0, None, 0
         while attempt <= self.retries:
             t0 = time.perf_counter()
             try:
-                raw = self._create(spec, payload)
+                raw = self._create(spec, payload, deadline_s=deadline)
             except LLMTimeout as exc:
                 # Дедлайн считаем отдельно от временных отказов: повторять зависший
                 # запрос дорого, поэтому у него свой, более скупой лимит.
@@ -437,8 +454,8 @@ class LLMClient:
                 if self.trace:
                     self.trace.event("llm.timeout", role=role, provider=spec.provider,
                                      model=spec.model, purpose=purpose,
-                                     hard_timeout_s=self.hard_timeout, attempt=timeouts)
-                if timeouts > self.timeout_retries:
+                                     hard_timeout_s=deadline, attempt=timeouts)
+                if timeouts > timeout_budget:
                     raise
                 attempt += 1
                 continue
