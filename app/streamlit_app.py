@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st  # noqa: E402
 
 from app.runner import run_question                  # noqa: E402
+from app import followup                            # noqa: E402
 from core.config import ConfigError, get_config      # noqa: E402
 
 ПРИМЕРЫ = [
@@ -145,14 +146,31 @@ def main():
     if profile != cfg.profile:
         cfg = get_config(profile, reload=True)
 
+    # Если прошлый прогон закончился уточняющим вопросом, следующий ввод — это
+    # ОТВЕТ на него, а не новый вопрос. Склеиваем с исходной формулировкой:
+    # иначе агент получает «Z-1060» и не знает, о чём сам спрашивал.
+    waiting = followup.pending(st.session_state.get("result"))
+    rounds = st.session_state.get("clarify_rounds", 0)
+    if waiting and rounds < followup.MAX_ROUNDS:
+        st.info(f"Агент уточняет: **{st.session_state['result']['answer']}**\n\n"
+                f"Исходный вопрос: «{waiting}» — ответьте ниже, он подставится сам.")
+
     example = st.selectbox("Примеры вопросов", ["— свой вопрос —"] + ПРИМЕРЫ)
     question = st.text_area(
-        "Вопрос", value="" if example.startswith("—") else example, height=80,
-        placeholder="Например: почему заказ Z-1060 не поставлен на линию ЛП2?")
+        "Ответ на уточнение" if waiting else "Вопрос",
+        value="" if example.startswith("—") else example, height=80,
+        placeholder=("Например: Z-1060" if waiting else
+                     "Например: почему заказ Z-1060 не поставлен на линию ЛП2?"))
 
     if st.button("Объяснить", type="primary", disabled=not question.strip()):
+        asked = question.strip()
+        if waiting and rounds < followup.MAX_ROUNDS:
+            asked = followup.merge(waiting, asked)
+            st.session_state["clarify_rounds"] = rounds + 1
+        else:
+            st.session_state["clarify_rounds"] = 0
         with st.spinner("Агент читает задание, план, НСИ и регламенты…"):
-            result = run_question(cfg, question.strip(), task, quiet=True)
+            result = run_question(cfg, asked, task, quiet=True)
         st.session_state["result"] = result
 
     result = st.session_state.get("result")

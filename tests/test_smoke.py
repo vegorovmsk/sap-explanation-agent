@@ -393,6 +393,38 @@ def main() -> int:
           probe.seen.index(CONTEXT_MARKER) < len(probe.seen) // 10,
           f"позиция {probe.seen.index(CONTEXT_MARKER)} из {len(probe.seen)}")
 
+    print("\nЗамыкание уточняющего вопроса")
+    # Ветка clarify задавала вопрос и на этом прогон заканчивался: пользователь
+    # отвечал «Z-1060», начинался новый прогон, и он уже не знал, о чём сам
+    # спрашивал. Склейка замыкает круг — но переносит ТОЛЬКО формулировку.
+    from app import followup                                    # noqa: E402
+    merged = followup.merge("Почему заказ не туда встал?", "Z-1060")
+    check("ответ склеен с исходным вопросом",
+          "Почему заказ не туда встал?" in merged and "Z-1060" in merged, merged)
+    check("пустой ответ не портит вопрос",
+          followup.merge("Где заказ Z-1001?", "   ") == "Где заказ Z-1001?")
+    check("вопрос без ответа остаётся собой",
+          followup.merge("", "Z-1060") == "Z-1060")
+    check("ждущий ответа вопрос виден только после clarify",
+          followup.pending({"status": "clarify", "question": "Почему заказ не туда встал?"})
+          == "Почему заказ не туда встал?")
+    check("после обычного ответа ничего не ждём",
+          followup.pending({"status": "confirmed", "question": "x"}) is None
+          and followup.pending(None) is None)
+    check("круг уточнений ровно один", followup.MAX_ROUNDS == 1,
+          str(followup.MAX_ROUNDS))
+    # Главное ограничение: между ходами переносится вопрос, но не доказательства.
+    # Унаследованный факт не имеет координаты в доказательной базе нового прогона,
+    # и механические проверки этого прогона его не видели.
+    import inspect                                              # noqa: E402
+    source = inspect.getsource(followup)
+    check("модуль склейки не трогает факты и источники",
+          not any(w in source.replace("не вправе", "") for w in
+                  ("evidence", "locator", "sources_seen", "state.")),
+          "в модуле не должно быть работы с доказательной базой")
+    check("склеенный вопрос — обычная строка, проходящая входной шлюз",
+          isinstance(merged, str))
+
     print("\nСостояние агента")
     st = AgentState(required_sources=["plan", "nsi", "code"])
     st.add_evidence(Evidence(claim="заказ на ЛП1", source="plan", locator="Все_ПП, строка 42"))

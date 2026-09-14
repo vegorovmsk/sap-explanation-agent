@@ -23,7 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import graph as agent_graph                        # noqa: E402
+from agent import graph as agent_graph
+from app import followup                        # noqa: E402
 from agent.deps import Deps                                   # noqa: E402
 from agent.state import AgentState                            # noqa: E402
 from core.config import ConfigError, get_config               # noqa: E402
@@ -308,6 +309,9 @@ def run_question(cfg, question: str, task_file: str, quiet: bool,
     return {
         "request_id": trace.request_id,
         "status": state.status,
+        # Вопрос возвращается наружу, чтобы слой приложения мог замкнуть
+        # уточнение: ответ пользователя склеивается с исходной формулировкой.
+        "question": question,
         "intent": state.intent,
         "entities": state.entities,
         "route": {"role": state.role, "companion_role": state.companion_role,
@@ -351,6 +355,31 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     result = run_question(cfg, args.question, task_file, quiet=args.quiet or args.json)
+
+    # Замыкание уточнения. Ветка clarify задаёт один вопрос и на этом прогон
+    # заканчивался: пользователь отвечал «Z-1060», начинался новый прогон, и он
+    # уже не знал, о чём спрашивал минуту назад. Здесь ответ склеивается с
+    # исходной формулировкой — и это ЕДИНСТВЕННОЕ, что переносится между ходами:
+    # источники следующий прогон читает заново, иначе в ответе оказались бы
+    # утверждения без координат из его собственной доказательной базы.
+    #
+    # Только в живой консоли: при --json и --quiet поведение прежнее, и прогон
+    # золотого набора, который зовёт run_question напрямую, этой ветки не видит.
+    interactive = not (args.json or args.quiet) and sys.stdin.isatty()
+    rounds = 0
+    while (interactive and result["status"] == "clarify"
+           and rounds < followup.MAX_ROUNDS):
+        print("\n" + result["answer"])
+        try:
+            reply = input("Ваш ответ (Enter — закончить): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not reply:
+            break
+        rounds += 1
+        result = run_question(cfg, followup.merge(args.question, reply),
+                              task_file, quiet=False)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
