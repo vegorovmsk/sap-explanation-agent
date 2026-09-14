@@ -71,21 +71,108 @@ ENUMERATING = ("InputData._load_tables", "описание модуля")
 # Параметр отбора: как он называется в норме и как — в коде и задании. Слева
 # стемы русских слов (нормы пишут «диаметра кольца», «калибра»), справа
 # идентификаторы. Совпадение считается по стемам, иначе падежи всё ломают.
-PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
+# Параметр отбора: как он называется в норме и как — в коде. Раньше здесь лежал
+# словарь из одиннадцати записей, написанный руками. Он был лишним: стенд
+# публикует это соответствие сам — `column_translation` в его config.yaml, 54
+# записи вида «Диаметр кольца → ring_diameter».
+#
+# Цена рукописного словаря измерена. Он не содержал строки «Блок 3, км →
+# min_caliber_block», и обход не видел, что ТР-ЭКС п. 3.5 требует формировать
+# блоки по калибрам, табл. 12 даёт для этого колонку, а demo/extrusion.py читает
+# только min_common_block и min_color_block. Это расхождение того же рода, что
+# «диаметр кольца», и именно о нём спрашивает кейс B3 золотого набора — тот, что
+# не проходил ни в одном прогоне. Словарь, написанный по памяти, сделал агента
+# слепым к дефекту, на котором его же и проверяют.
+#
+# Значения ниже запасные — на случай стенда без `column_translation` в конфиге.
+FALLBACK_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
     "калибр": {"норма": ("калибр",), "код": ("caliber", "калибр")},
     "диаметр кольца": {"норма": ("диаметр", "кольц"),
                        "код": ("ring_diameter", "диаметркольца")},
     "вид печати": {"норма": ("вид", "печ"), "код": ("print_type", "видпечати")},
-    "вид оболочки": {"норма": ("вид",), "код": ("kind", "вид")},
-    "тип оболочки": {"норма": ("тип",), "код": ("sort", "тип")},
-    "цвет": {"норма": ("цвет",), "код": ("color", "цвет")},
-    "толщина": {"норма": ("толщин",), "код": ("thickness", "толщин")},
     "объём заказа": {"норма": ("объем",), "код": ("order_volume", "volume", "объем")},
-    "срок хранения": {"норма": ("срок", "хранен"),
-                      "код": ("storage", "hold", "срокхранения")},
-    "эксклюзивность": {"норма": ("эксклюзивнос",), "код": ("exclusivity", "эксклюзив")},
-    "дата готовности": {"норма": ("дата", "готовнос"), "код": ("due_date", "deadline")},
 }
+
+_PARAMS_CACHE: dict[str, dict] = {}
+_NUMERIC_CACHE: dict[str, set] = {}
+
+
+def numeric_columns(cfg) -> set[str]:
+    """Колонки НСИ с числовыми значениями — порогами, размерами, нормативами.
+
+    Зачем отделять их от текстовых. Обход ищет параметры, которые норма называет,
+    а код этапа не читает. Среди колонок есть и ярлыки: «Множество оборудования»
+    со значениями «Набор-А», «Набор-Б» — это не условие расчёта, а имя группы, и
+    код пользуется её содержимым, не обращаясь к самому имени. Пометив такую
+    колонку как непокрытую, обход поднимал ложную тревогу — и не безобидно:
+    кандидат в карте заставляет планировщик подключать поиск по нормам и коду на
+    вопросах, где это не нужно (замерено на кейсе A1).
+
+    Признак числового значения выбран как отсев, и это эвристика, а не закон.
+    Числовой параметр — порог, диаметр, объём блока — норма называет как условие
+    расчёта, и его отсутствие в коде означает несовпадение. Текстовый флаг тоже
+    может быть условием, поэтому фильтр иногда промолчит там, где стоило бы
+    сказать. Смещение выбрано сознательно: ложный кандидат меняет поведение
+    агента на посторонних вопросах, пропущенный — лишь не подсказывает модели
+    того, что она способна заметить и сама.
+    """
+    key = str(getattr(cfg.stand, "params_dir", "")) or "—"
+    if key in _NUMERIC_CACHE:
+        return _NUMERIC_CACHE[key]
+    found: set[str] = set()
+    try:
+        import pandas as pd
+        from tools.nsi_lookup import catalogue
+
+        for info in catalogue(cfg).values():
+            try:
+                frame = pd.read_excel(info["path"])
+            except Exception:                                # noqa: BLE001
+                continue
+            for column in frame.columns:
+                values = frame[column].dropna()
+                if not values.empty and pd.api.types.is_numeric_dtype(values):
+                    found.add(str(column).strip().lower())
+    except Exception:                                        # noqa: BLE001
+        pass
+    _NUMERIC_CACHE[key] = found
+    return found
+
+
+
+def params_for(cfg) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Словарь параметров отбора, прочитанный из конфига наблюдаемой системы.
+
+    Русское имя колонки даёт стемы, по которым параметр узнаётся в тексте нормы;
+    идентификатор — имя, под которым его следует искать в коде. Обе половины
+    берутся из одной строки конфига стенда, поэтому они не могут разойтись.
+    """
+    key = str(getattr(cfg.stand, "config_file", "")) or "—"
+    if key in _PARAMS_CACHE:
+        return _PARAMS_CACHE[key]
+
+    table: dict[str, dict[str, tuple[str, ...]]] = {}
+    try:
+        import yaml
+
+        with open(cfg.stand.config_file, encoding="utf-8") as fh:
+            translation = (yaml.safe_load(fh) or {}).get("column_translation") or {}
+    except (OSError, ValueError, AttributeError):
+        translation = {}
+
+    for human, ident in translation.items():
+        human = str(human).strip()
+        stems = tuple(t for t in terms(human.lower()) if len(t) >= 3)
+        if not stems or not isinstance(ident, str):
+            continue
+        name = human.lower()
+        # Одному идентификатору может соответствовать несколько человеческих
+        # имён («Вид» и «Вид оболочки» → kind). Берём первое: для узнавания в
+        # норме важны стемы, а они у синонимов пересекаются.
+        table.setdefault(name, {"норма": stems,
+                                "код": (ident, name.replace(" ", ""))})
+    _PARAMS_CACHE[key] = table or FALLBACK_PARAMS
+    return _PARAMS_CACHE[key]
 
 
 def _load(path: Path) -> list[dict]:
@@ -168,15 +255,20 @@ def build_map(cfg, stage: str) -> dict:
     # обязан их читать. Параметр, которого в коде решения нет ни под одним из
     # имён, — кандидат в расхождение, с координатами с обеих сторон.
     code_blob = _norm_code(" ".join(c["text"] for c in covering))
+    numbers = numeric_columns(cfg)
     uncovered: list[dict] = []
     seen: set[str] = set()
     for r in regs:
         stems = set(terms(r["text"]))
         clause = f"{r['meta'].get('номер_документа')} п. {r['meta'].get('пункт')}"
-        for name, spec in PARAMS.items():
+        for name, spec in params_for(cfg).items():
             if name in seen or not set(spec["норма"]).issubset(stems):
                 continue
             if any(alias in code_blob for alias in map(_norm_code, spec["код"])):
+                continue
+            if numbers and name not in numbers:
+                # Ярлык, а не условие расчёта: код пользуется содержимым группы,
+                # не обращаясь к имени колонки. См. numeric_columns().
                 continue
             seen.add(name)
             uncovered.append({"параметр": name, "пункт": clause,
