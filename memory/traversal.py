@@ -95,6 +95,13 @@ FALLBACK_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
 
 _PARAMS_CACHE: dict[str, dict] = {}
 _NUMERIC_CACHE: dict[str, set] = {}
+_COLUMN_TABLES: dict[str, dict] = {}
+
+
+def columns_by_table(cfg) -> dict[str, set[str]]:
+    """Колонка НСИ → номера таблиц, где она объявлена."""
+    _ = numeric_columns(cfg)                 # обе карты строятся одним проходом
+    return _COLUMN_TABLES.get(str(getattr(cfg.stand, "params_dir", "")) or "—", {})
 
 
 def numeric_columns(cfg) -> set[str]:
@@ -120,6 +127,7 @@ def numeric_columns(cfg) -> set[str]:
     if key in _NUMERIC_CACHE:
         return _NUMERIC_CACHE[key]
     found: set[str] = set()
+    where: dict[str, set[str]] = {}
     try:
         import pandas as pd
         from tools.nsi_lookup import catalogue
@@ -130,12 +138,15 @@ def numeric_columns(cfg) -> set[str]:
             except Exception:                                # noqa: BLE001
                 continue
             for column in frame.columns:
+                name = str(column).strip().lower()
+                where.setdefault(name, set()).add(str(info["number"]))
                 values = frame[column].dropna()
                 if not values.empty and pd.api.types.is_numeric_dtype(values):
-                    found.add(str(column).strip().lower())
+                    found.add(name)
     except Exception:                                        # noqa: BLE001
         pass
     _NUMERIC_CACHE[key] = found
+    _COLUMN_TABLES[key] = where
     return found
 
 
@@ -209,6 +220,22 @@ def stage_from_question(question: str) -> str | None:
     return normalize_stage(question)
 
 
+
+def _reverse_translation(cfg) -> dict[str, tuple[str, ...]]:
+    """Идентификатор поля расчёта → стемы его человеческого имени.
+
+    Обратная сторона того же соответствия, что система объявляет в своём конфиге.
+    Нужна, чтобы понять, о чём параметр: «caliber» → «калибр», и пункт со словом
+    «калибр» оказывается тем самым, который этот параметр и требует.
+    """
+    out: dict[str, set[str]] = {}
+    for human, spec in params_for(cfg).items():
+        for alias in spec["код"]:
+            for token in re.split(r"[_\s]+", str(alias).lower()):
+                if len(token) >= 3:
+                    out.setdefault(token, set()).update(terms(human))
+    return {k: tuple(v) for k, v in out.items()}
+
 def build_map(cfg, stage: str) -> dict:
     """Карта источников этапа: нормы, таблицы, код и кандидаты в расхождения."""
     stage_map_cfg, shared_files, report_only = _stand_code(cfg)
@@ -261,31 +288,73 @@ def build_map(cfg, stage: str) -> dict:
     # имён, — кандидат в расхождение, с координатами с обеих сторон.
     code_blob = _norm_code(" ".join(c["text"] for c in covering))
     numbers = numeric_columns(cfg)
+    where = columns_by_table(cfg)
     uncovered: list[dict] = []
-    seen: set[str] = set()
-    for r in regs:
-        stems = set(terms(r["text"]))
-        clause = f"{r['meta'].get('номер_документа')} п. {r['meta'].get('пункт')}"
-        for name, spec in params_for(cfg).items():
-            if name in seen or not set(spec["норма"]).issubset(stems):
-                continue
-            if any(alias in code_blob for alias in map(_norm_code, spec["код"])):
-                continue
-            if numbers and name not in numbers:
-                # Ярлык, а не условие расчёта: код пользуется содержимым группы,
-                # не обращаясь к имени колонки. См. numeric_columns().
-                continue
-            seen.add(name)
-            uncovered.append({"параметр": name, "пункт": clause,
-                              "координата_нормы": r["meta"].get("координата") or "",
-                              "код_этапа": list(stage_files),
-                              # Координаты функций, а не только имя файла: чтобы
-                              # заявить пропуск, надо показать МЕСТО, где норме
-                              # полагалось быть. «Параметра нет в demo/ringing.py»
-                              # проверить нельзя, «нет в RingingStage.run:30-74» —
-                              # можно, открыв эти строки.
-                              "координаты_кода": [c["meta"]["координата"]
-                                                  for c in decision]})
+
+    # Пункты перебираются так, чтобы рабочая норма шла раньше определения
+    # термина. Прогон 15.09, кейс B3: параметр «Блок 3, км» опознаётся по стему
+    # «блок», а первым в документе идёт п. 1.1 «Основные термины: Блок —
+    # совокупность заказов…». Кандидат ссылался на определение, агент читал
+    # пункты про табл. 12 — и заземлить расхождение было нечем.
+    #
+    # Признак рабочего пункта не выдуман: пункт, ссылающийся на ТУ САМУЮ таблицу,
+    # где объявлена колонка, говорит о её применении, а определение термина не
+    # ссылается ни на что. Тот же признак делает обращение в поддержку точнее:
+    # «ТР-ЭКС п. 3.5 требует формировать блоки по калибрам с учётом приложения 5»
+    # проверяемо, «п. 1.1 определяет термин блок» — нет.
+    # Ссылки на таблицу мало: пунктов, ссылающихся на одну таблицу, несколько, и
+    # выполняются они по-разному. ТР-ЭКС п. 3.2 ссылается на табл. 12 и требует
+    # проверять Блок 1 и Блок 2 — код это делает, нарушения нет. Нарушен п. 3.5:
+    # «формирование блоков ПО КАЛИБРАМ с учётом приложения 5», а калибрового
+    # блока код не читает. Обращение, сославшееся бы на п. 3.2, обвинило бы
+    # систему в нарушении того, что она соблюдает, — с настоящей координатой, а
+    # потому особенно убедительно и особенно неверно.
+    #
+    # Различить их можно по смыслу идентификатора: min_caliber_block содержит
+    # «caliber», а обратный перевод того же конфига стенда даёт «Калибр» →
+    # «калибр». Пункт, где этот стем есть, говорит именно об этом параметре.
+    back = _reverse_translation(cfg)
+
+    def sense_stems(spec: dict) -> set[str]:
+        """Стемы, раскрывающие смысл параметра: из имени колонки и из кода."""
+        out = set(spec["норма"])
+        for alias in spec["код"]:
+            for token in re.split(r"[_\s]+", str(alias).lower()):
+                out.update(back.get(token, ()))
+        return out
+
+    def clause_rank(record: dict, tables_of_param: set[str], spec: dict) -> tuple:
+        refs = {str(t) for t in (record["meta"].get("таблицы_НСИ") or [])}
+        stems = set(terms(record["text"]))
+        matched = len(sense_stems(spec) & stems)
+        # сначала пункты со ссылкой на таблицу параметра, среди них — те, где
+        # смысл параметра раскрыт полнее; при равенстве побеждает порядок
+        # документа, поэтому выдача устойчива
+        return (0 if refs & tables_of_param else 1, -matched)
+
+    for name, spec in params_for(cfg).items():
+        if any(alias in code_blob for alias in map(_norm_code, spec["код"])):
+            continue
+        if numbers and name not in numbers:
+            # Ярлык, а не условие расчёта: код пользуется содержимым группы,
+            # не обращаясь к имени колонки. См. numeric_columns().
+            continue
+        tables_of_param = where.get(name, set())
+        matched = [r for r in regs if set(spec["норма"]).issubset(set(terms(r["text"])))]
+        if not matched:
+            continue
+        r = min(matched, key=lambda rec: clause_rank(rec, tables_of_param, spec))
+        uncovered.append({
+            "параметр": name,
+            "пункт": f"{r['meta'].get('номер_документа')} п. {r['meta'].get('пункт')}",
+            "координата_нормы": r["meta"].get("координата") or "",
+            "код_этапа": list(stage_files),
+            # Координаты функций, а не только имя файла: чтобы заявить пропуск,
+            # надо показать МЕСТО, где норме полагалось быть. «Параметра нет в
+            # demo/ringing.py» проверить нельзя, «нет в RingingStage.run:30-74» —
+            # можно, открыв эти строки.
+            "координаты_кода": [c["meta"]["координата"] for c in decision],
+        })
 
     return {
         "этап": stage,
