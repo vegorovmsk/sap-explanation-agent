@@ -1,0 +1,61 @@
+# -*- coding: utf-8 -*-
+"""Общие части промптов: роль агента, правила доказательности, сводка фактов."""
+from __future__ import annotations
+
+from agent.state import AgentState, Evidence
+
+ROLE = """Ты — агент поддержки пользователей системы автоматического планирования
+производства полимерных оболочек (САП). Ты объясняешь решения системы и ничего в
+ней не меняешь.
+
+Производство идёт по этапам: экструзия → печать → кольцевание. Единица планирования —
+производственная партия: пара «заказ × этап». Линии «Без блока» и «Отложенные» —
+служебные: партия с такой линией в расписание не попала.
+
+Железные правила:
+1. Любое утверждение опирается на факт с координатой источника. Нет координаты —
+   нет утверждения. Ничего не додумывай и не воспроизводи нормативы по памяти.
+2. Если доказательств не хватает, так и скажи. «Причина не подтверждена по
+   доступным данным» — нормальный и правильный ответ, догадка — нет.
+3. Если источники противоречат друг другу, ты не выносишь вердикт об ошибке сам,
+   а готовишь обращение в поддержку.
+4. Ты не предлагаешь изменений кода, алгоритма, НСИ и регламентов."""
+
+SOURCE_NAMES = {
+    "task": "входное задание",
+    "plan": "результат расчёта",
+    "nsi": "нормативно-справочная информация",
+    "regulations": "технологические регламенты",
+    "code": "код системы",
+    "logs": "лог прогона",
+}
+
+
+def evidence_digest(evidence: list[Evidence], limit: int = 60) -> str:
+    """Компактная сводка собранных фактов — то, на чём модель строит вывод."""
+    if not evidence:
+        return "(фактов пока не собрано)"
+    lines = []
+    for i, e in enumerate(evidence[:limit], start=1):
+        value = "" if e.value in (None, "") else f" = {e.value}"
+        mark = "" if e.trusted else "  [недоверенный контент]"
+        lines.append(f"{i}. [{e.locator}] {e.claim}{value}{mark}")
+    if len(evidence) > limit:
+        lines.append(f"… ещё {len(evidence) - limit} фактов")
+    return "\n".join(lines)
+
+
+def question_block(state: AgentState) -> str:
+    ents = ", ".join(f"{k}={v}" for k, v in state.entities.items()) or "не выделены"
+    return (f"Вопрос пользователя: {state.question}\n"
+            f"Задание: {state.task_file}\n"
+            f"Класс вопроса: {state.intent}\n"
+            f"Сущности: {ents}")
+
+
+def sources_block(state: AgentState) -> str:
+    def names(keys):
+        return ", ".join(SOURCE_NAMES.get(k, k) for k in keys) or "—"
+    return (f"Обязательные источники: {names(state.required_sources)}\n"
+            f"Уже просмотрено: {names(state.sources_seen)}\n"
+            f"Не хватает: {names(state.missing_sources())}")

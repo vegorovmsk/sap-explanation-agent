@@ -1,0 +1,200 @@
+# ============================================================================
+# Роли моделей и их реализации.
+#
+# Ролей четыре (см. docs/routing.md):
+#   M_fast     — классификация намерения, извлечение сущностей, простой поиск;
+#   M_balanced — объяснение одного заказа, работа с табличными фактами, тикет;
+#   M_reason   — сверка плана, НСИ, регламента и кода; проверка финального ответа;
+#   M_code     — локализация и объяснение условий в Python.
+# Плюс роль эмбеддингов для векторной памяти.
+#
+# Профиль выбирается переменной SAP_AGENT_PROFILE или ключом default_profile.
+# Профиль local обязан работать целиком: это режим закрытого контура.
+#
+# ВНИМАНИЕ: идентификаторы моделей — кандидаты для замера, а не окончательный
+# выбор. Облачные сверить со списком на https://openrouter.ai/models, локальные —
+# командой `ollama list` или по https://ollama.com/library. Окончательный выбор
+# делает llm/bench.py.
+#
+# ЛОКАЛЬНЫЕ МОДЕЛИ И ЖЕЛЕЗО. Профиль local обязан работать целиком — это режим
+# закрытого контура. Но «работать» и «работать за разумное время» на машине без
+# видеокарты — разные вещи, поэтому здесь выбраны ноутбучные размеры:
+#
+#   размер   память под модель (Q4)   роль, для которой хватает
+#   3B       ~2.5 ГБ                  разбор запроса, если 7B не влезает
+#   7B       ~5 ГБ                    разбор запроса, код
+#   14B      ~9 ГБ                    объяснение, сверка источников
+#   32B      ~20 ГБ                   серверный размер, не ноутбучный
+#
+# Сверх этого нужна память под контекст: промпт сбора фактов с каталогом таблиц
+# НСИ, картой этапа и сводкой фактов — это 3–6 тысяч токенов.
+#
+# И главное про контекст: Ollama обрезает промпт до num_ctx МОЛЧА. Если оставить
+# значение по умолчанию, модель получит огрызок задания и никак об этом не
+# сообщит — ровно тот дефект, который уже был найден в индексе кода. Поэтому
+# серверу Ollama задаётся OLLAMA_CONTEXT_LENGTH=8192, а `--selftest` проверяет
+# контекст функционально: кладёт метку в начало длинного промпта и смотрит,
+# дошла ли она до модели.
+# ============================================================================
+
+default_profile: hybrid
+
+providers:
+  ollama:
+    base_url: "${OLLAMA_BASE_URL:-http://localhost:11434/v1}"
+    api_key: "ollama"            # Ollama ключ не проверяет, но SDK требует непустой
+    api_key_env: null
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: OPENROUTER_API_KEY
+    headers:
+      HTTP-Referer: "${OPENROUTER_APP_URL:-http://localhost}"
+      X-Title: "${OPENROUTER_APP_TITLE:-SAP Explanation Agent}"
+
+# --- Профили: роль → ключ из models -------------------------------------------
+profiles:
+  # Всё локально. Режим закрытого контура, нулевая стоимость.
+  local:
+    M_fast: ollama_fast
+    M_balanced: ollama_balanced
+    M_reason: ollama_reason
+    M_code: ollama_code
+    embeddings: ollama_embed
+
+  # Дешёвое и частое — локально, тяжёлое рассуждение и код — в облаке.
+  # На машине без видеокарты этот профиль МЕДЛЕННЕЕ облачного: локальными здесь
+  # стоят M_fast и M_balanced, а это самые часто вызываемые роли — сбор фактов,
+  # оценка достаточности, генерация ответа. Для работы берите cloud (в нём
+  # эмбеддинги всё равно локальные), а hybrid и local — чтобы показать контур.
+  hybrid:
+    M_fast: ollama_fast
+    M_balanced: ollama_balanced
+    M_reason: or_reason
+    M_code: or_code
+    embeddings: ollama_embed
+
+  # Всё в облаке. Быстрая разработка и верхняя планка качества для замеров.
+  #
+  # У ролей здесь ЦЕПОЧКА моделей: первая основная, остальные запасные. Прогон
+  # золотого набора 13.09 потерял 14 кейсов из 19 не по качеству, а по доступности:
+  # у OpenRouter временно не нашлось провайдера с поддержкой инструментов для
+  # qwen-2.5-72b («404 No endpoints found that support tool use»), а у deepseek
+  # сработал лимит апстрима (429). Обе беды лечатся одним — второй моделью той же
+  # роли. Запасная выбрана так, чтобы отличался ПРОВАЙДЕР МОДЕЛИ, иначе общий
+  # отказ накроет всю цепочку.
+  cloud:
+    M_fast: [or_fast, or_balanced]
+    M_balanced: [or_balanced, or_reason]
+    M_reason: [or_reason, or_balanced]
+    M_code: [or_code, or_balanced]
+    embeddings: ollama_embed     # эмбеддинги держим локально: корпус внутренний
+
+# --- Реализации ---------------------------------------------------------------
+# price_in / price_out — доллары за 1M токенов; для локальных моделей 0.
+# Цены облачных моделей не прикидываются на глаз: провайдер отдаёт их сам,
+# и `python -m llm.probe` их печатает. Выдуманная цена превращает подсчёт
+# стоимости прогона в декорацию — а он стоит в отчёте по золотому набору
+# и в лимите max_cost_usd. Значения ниже сверены 14.09.
+models:
+  ollama_fast:
+    provider: ollama
+    model: "qwen2.5:7b-instruct"
+    temperature: 0
+    max_tokens: 1024
+    supports_tools: true
+    supports_json_schema: false     # у Ollama проверено только json_object
+    price_in: 0
+    price_out: 0
+  ollama_balanced:
+    provider: ollama
+    model: "qwen2.5:14b-instruct"
+    temperature: 0.1
+    max_tokens: 2048
+    supports_tools: true
+    supports_json_schema: false
+    price_in: 0
+    price_out: 0
+  ollama_reason:
+    provider: ollama
+    # Было qwen3:32b — это ~20 ГБ в Q4, серверный размер: профиль local на
+    # ноутбуке с ним просто не поднимался. Сверка источников отдаёт короткий
+    # JSON, и 14B для неё достаточно. Если есть сервер с видеокартой, верните
+    # сюда 32B: качество сверки — самое узкое место всей цепочки.
+    model: "qwen2.5:14b-instruct"
+    temperature: 0.1
+    # Роль отдаёт короткий вердикт. Тесный лимит здесь ещё важнее, чем в облаке:
+    # на процессоре каждый лишний токен — это десятая доля секунды.
+    max_tokens: 1024
+    supports_tools: true
+    supports_json_schema: false
+    price_in: 0
+    price_out: 0
+  ollama_code:
+    provider: ollama
+    # 7B вместо 14B: роль редкая, а два разных 14B рядом с 14B для сверки
+    # означают постоянную перезагрузку моделей в память.
+    model: "qwen2.5-coder:7b"
+    temperature: 0
+    max_tokens: 2048
+    supports_tools: true
+    supports_json_schema: false
+    price_in: 0
+    price_out: 0
+  ollama_embed:
+    provider: ollama
+    # 568M параметров — это работа для процессора, видеокарта не нужна: разово
+    # закодировать 172 фрагмента корпуса — секунды, запрос — один короткий текст.
+    # Без Ollama сборка индекса откатывается на HashingEmbedder (символьные
+    # n-граммы), и смысловая половина гибридного поиска не работает вовсе:
+    # находится только то, что совпало буквально. Это единственная локальная
+    # модель, которая нужна всегда — в том числе в профиле cloud.
+    model: "bge-m3"               # мультиязычная: корпус регламентов русскоязычный
+    kind: embedding
+    price_in: 0
+    price_out: 0
+
+  or_fast:
+    provider: openrouter
+    model: "openai/gpt-4o-mini"
+    temperature: 0
+    max_tokens: 1024
+    supports_tools: true
+    supports_json_schema: true
+    price_in: 0.15
+    price_out: 0.60
+  or_balanced:
+    provider: openrouter
+    model: "qwen/qwen-2.5-72b-instruct"
+    temperature: 0.1
+    max_tokens: 2048
+    supports_tools: true
+    supports_json_schema: true
+    price_in: 0.36
+    price_out: 0.40
+  or_reason:
+    provider: openrouter
+    model: "deepseek/deepseek-chat"
+    temperature: 0.1
+    # Роль M_reason отдаёт только короткий JSON (вердикт сверки, разбор проверки).
+    # На 4096 токенах модель уходила в рассуждения, упиралась в лимит и отдавала
+    # обрезанный JSON — 332 с и обязательная починка. Тесный лимит делает обрыв
+    # быстрым и дешёвым, а починка требует краткости.
+    max_tokens: 1024
+    supports_tools: true
+    supports_json_schema: true
+    price_in: 0.2574
+    price_out: 1.029
+  # Проверено `python -m llm.probe` 14.09: qwen-2.5-coder-32b отвечает «404 No
+  # endpoints found that support tool use» — то есть роль M_code не работала ни
+  # разу за весь прогон золотого набора, все 47 вызовов молча уходили в запасную
+  # модель. Живых кандидатов с инструментами оказалось два: qwen3-coder и
+  # deepseek-chat; второй уже занят ролью M_reason, поэтому здесь первый.
+  or_code:
+    provider: openrouter
+    model: "qwen/qwen3-coder"
+    temperature: 0
+    max_tokens: 2048
+    supports_tools: true
+    supports_json_schema: true
+    price_in: 0.30
+    price_out: 1.00
