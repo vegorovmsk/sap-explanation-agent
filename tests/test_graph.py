@@ -26,6 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Docker. База в памяти ничего снаружи не ждёт и ничего не оставляет после себя.
 os.environ["QDRANT_URL"] = ""
 os.environ["QDRANT_PATH"] = ":memory:"
+# Индексы тоже строятся в своём каталоге. Сборка памяти кладёт JSON, npz и bm25
+# рядом с базой Qdrant, поэтому набор, собирающий индекс запасным эмбеддером,
+# затирал рабочий: после прогона тестов агент искал лексической заглушкой вместо
+# bge-m3 и молчал об этом. Набор обязан быть автономным в обе стороны — не
+# зависеть от окружения и не портить его.
+os.environ["SAP_AGENT_STORE_DIR"] = tempfile.mkdtemp(prefix="sap-agent-store-")
 
 from agent import graph as agent_graph            # noqa: E402
 from agent.deps import Deps                       # noqa: E402
@@ -689,6 +695,18 @@ def main() -> int:
     check("выбор записан в трассу и проверяем",
           any(e.get("scope") == "system" for e in events),
           "в трассе должен быть scope")
+    # Этот же сценарий уронил сборку ответа: у одного факта координата оказалась
+    # None, и «", ".join» свалился TypeError уже ПОСЛЕ того, как ответ был
+    # написан. Падение в узле ответа уносит весь прогон вместе с собранными
+    # фактами, поэтому координата приводится к строке у истока, а перечень
+    # источников пропускает факты без неё.
+    check("сборка ответа пережила факт без координаты",
+          state.status != "error", state.status)
+    check("координата никогда не None", all(e.locator is not None for e in state.evidence),
+          str([e.locator for e in state.evidence if e.locator is None]))
+    check("в перечне источников нет пустых координат",
+          ": ," not in state.answer and not state.answer.count(": \n"),
+          state.answer[:200])
 
     print("\nПустой отказ объясняет, что делать дальше")
     # Тот же прогон напечатал «Что удалось проверить:» и под ним одно пустое тире:

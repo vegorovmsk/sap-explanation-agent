@@ -41,7 +41,11 @@ def evidence_digest(evidence: list[Evidence], limit: int = 60) -> str:
     for i, e in enumerate(evidence[:limit], start=1):
         value = "" if e.value in (None, "") else f" = {e.value}"
         mark = "" if e.trusted else "  [недоверенный контент]"
-        lines.append(f"{i}. [{e.locator}] {e.claim}{value}{mark}")
+        # Факт без координаты честнее пометить, чем напечатать «[None]»:
+        # скобка с пустотой внутри читается моделью как координата, и она её
+        # цитирует.
+        where = e.locator or "координаты нет — ссылаться нельзя"
+        lines.append(f"{i}. [{where}] {e.claim}{value}{mark}")
     if len(evidence) > limit:
         lines.append(f"… ещё {len(evidence) - limit} фактов")
     return "\n".join(lines)

@@ -47,8 +47,13 @@ def evidence_from(result: ToolResult, args: dict) -> list[Evidence]:
     out: list[Evidence] = []
 
     def add(claim: str, locator: str, value: Any = None) -> None:
+        # Координата приводится к строке здесь, у истока. Пустая строка — это
+        # «координаты нет», и её видно всем проверкам; None — это дыра, которая
+        # всплывает где угодно потом: сборка ответа падала на «", ".join» уже
+        # после того, как ответ был написан, и уносила весь прогон.
         out.append(Evidence(claim=claim, value=value, source=source,
-                            locator=locator or result.source, tool=tool, trusted=trusted))
+                            locator=locator or result.source or "",
+                            tool=tool, trusted=trusted))
 
     # отсутствие записи — тоже доказательство
     if result.status == "not_found":

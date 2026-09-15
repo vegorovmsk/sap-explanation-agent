@@ -184,8 +184,15 @@ def render(state: AgentState) -> str:
     """
     parts = [f"Краткий вывод:\n{state.answer_summary}", ""]
     parts.append("Проверенные источники:")
+    # Факт без координаты в перечень источников не идёт. Не косметика: раньше
+    # строка склеивалась через ", ".join и падала на первом же None, унося весь
+    # прогон в TypeError уже после того, как ответ был написан. А по смыслу
+    # координата здесь и есть содержание раздела: строка «Проверенные источники»
+    # существует затем, чтобы читатель мог открыть каждую и убедиться сам.
     seen: dict[str, list[str]] = {}
     for e in state.evidence:
+        if not e.locator:
+            continue
         seen.setdefault(e.source, [])
         if e.locator not in seen[e.source]:
             seen[e.source].append(e.locator)

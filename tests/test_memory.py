@@ -23,6 +23,12 @@ from pathlib import Path
 # Docker. База в памяти ничего снаружи не ждёт и ничего не оставляет после себя.
 os.environ["QDRANT_URL"] = ""
 os.environ["QDRANT_PATH"] = ":memory:"
+# Индексы тоже строятся в своём каталоге. Сборка памяти кладёт JSON, npz и bm25
+# рядом с базой Qdrant, поэтому набор, собирающий индекс запасным эмбеддером,
+# затирал рабочий: после прогона тестов агент искал лексической заглушкой вместо
+# bge-m3 и молчал об этом. Набор обязан быть автономным в обе стороны — не
+# зависеть от окружения и не портить его.
+os.environ["SAP_AGENT_STORE_DIR"] = tempfile.mkdtemp(prefix="sap-agent-store-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -264,6 +270,17 @@ def main() -> int:
     os.environ["SAP_AGENT_MEMORY_BACKEND"] = "qdrant"
     get_config(reload=True)
     reset_cache()
+
+    print("\nНабор не портит рабочий индекс")
+    # Сборка памяти кладёт JSON, npz и bm25 в store_dir. Пока каталог был общим,
+    # прогон тестов оставлял рабочий индекс собранным запасным эмбеддером —
+    # и агент после этого искал лексической заглушкой, не сообщая об этом.
+    from pathlib import Path as _P                               # noqa: E402
+    store = _P(get_config().root) / get_config().settings["memory"]["store_dir"]
+    check("индекс тестов лежит вне рабочего каталога",
+          "sap-agent-store-" in str(store), str(store))
+    check("рабочий каталог проекта не тронут",
+          not str(store).endswith(str(_P("memory") / "store")), str(store))
 
     print()
     if FAILED:
