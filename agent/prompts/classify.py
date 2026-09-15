@@ -9,10 +9,6 @@ SYSTEM = """Ты — разборщик запросов в системе по�
 класс вопроса и сущности. Ты НЕ отвечаешь на вопрос и НЕ строишь объяснений.
 
 Домен:
-- этапы производства: экструзия, печать, кольцевание;
-- линии экструзии ЛЭ1–ЛЭ4, печати ЛП1–ЛП3, кольцевания ЛК1–ЛК2;
-- номера заказов выглядят как Z-1060, A-3027, B-3084;
-- нормативно-справочная информация лежит в пронумерованных таблицах (табл. 1, 2, 8, 9, 12, 27 …);
 {stand_facts}
 
 Классы вопросов:
@@ -70,12 +66,12 @@ SCHEMA: dict = {
                 "left_neighbor": {"type": ["string", "null"], "description": "Левый соседний заказ в очереди"},
                 "right_neighbor": {"type": ["string", "null"], "description": "Правый соседний заказ в очереди"},
                 "stage": {"type": ["string", "null"], "description": "экструзия, печать или кольцевание"},
-                "line": {"type": ["string", "null"], "description": "Линия, например ЛП2"},
+                "line": {"type": ["string", "null"], "description": "Код линии ровно так, как он назван в вопросе"},
                 "kind": {"type": ["string", "null"], "description": "Вид оболочки"},
                 "sort": {"type": ["string", "null"], "description": "Тип оболочки"},
                 "caliber": {"type": ["integer", "null"], "description": "Калибр"},
                 "color": {"type": ["string", "null"], "description": "Цвет оболочки"},
-                "print_type": {"type": ["string", "null"], "description": "Вид печати, например Флексо-4"},
+                "print_type": {"type": ["string", "null"], "description": "Вид печати ровно так, как он назван в вопросе"},
                 "nsi_table": {"type": ["string", "null"], "description": "Номер таблицы НСИ, если назван"},
                 "due_date": {"type": ["string", "null"], "description": "Дата в формате ГГГГ-ММ-ДД, если названа"},
             },
@@ -111,14 +107,43 @@ def classifiable(intents: dict) -> dict:
     return {k: v for k, v in intents.items() if not v.get("не_для_классификации")}
 
 
-def stand_facts(stand) -> str:
-    """Служебные обозначения стенда — из его конфига, а не из памяти модели.
+def stand_facts(stand, cfg=None) -> str:
+    """Домен стенда целиком читается у стенда, а не пишется в промпте.
 
-    Раньше здесь стояли «2070, 2099, 2100» прямым текстом. На другом стенде с
-    другими служебными годами агент классифицировал бы вопрос неверно и ничем
-    бы этого не выдал: промпт выглядит одинаково убедительно с любыми числами.
+    Раньше здесь был рукописный блок: «линии экструзии ЛЭ1–ЛЭ4, печати ЛП1–ЛП3»,
+    «номера заказов выглядят как Z-1060, A-3027, B-3084», «таблицы 1, 2, 8, 9,
+    12, 27». Всё это — настоящие значения наблюдаемой системы, и держать их в
+    промпте вредно вдвойне. На другом стенде они молча неверны: промпт выглядит
+    одинаково убедительно с любыми числами. А на этом они подсказывают модели
+    ответ до чтения источников — живой прогон уже показывал, как пример
+    координаты из промпта возвращается в ответ как настоящая ссылка.
+
+    Примеры номеров заказов убраны совсем. Правило «переписывай номер ровно так,
+    как в вопросе» не нуждается в образце, а образец — это готовый номер, который
+    модель может подставить, когда в вопросе его нет.
     """
     lines = []
+    if cfg is not None:
+        try:
+            from memory.traversal import stage_hints
+
+            hints = stage_hints(cfg)
+            stages = sorted({v for v in hints["документ"].values()})
+            if stages:
+                lines.append("- этапы производства: " + ", ".join(stages) + ";")
+            by_stage: dict[str, list[str]] = {}
+            for code, stage in sorted(hints["линия"].items()):
+                by_stage.setdefault(stage, []).append(code.upper())
+            if by_stage:
+                shown = "; ".join(f"{st} — {', '.join(codes)}"
+                                  for st, codes in sorted(by_stage.items()))
+                lines.append(f"- линии по этапам: {shown};")
+            tables = sorted(hints["таблица"], key=lambda x: int(x) if x.isdigit() else 999)
+            if tables:
+                lines.append("- нормативно-справочная информация лежит в "
+                             "пронумерованных таблицах: " + ", ".join(tables) + ";")
+        except Exception:                                    # noqa: BLE001
+            pass
     pseudo = list(getattr(stand, "pseudo_lines", None) or [])
     if pseudo:
         names = ", ".join(f"«{p}»" for p in pseudo)
@@ -135,13 +160,14 @@ def stand_facts(stand) -> str:
     return "\n".join(lines)
 
 
-def build_messages(question: str, task_file: str, intents: dict, stand=None) -> list[dict]:
+def build_messages(question: str, task_file: str, intents: dict,
+                   stand=None, cfg=None) -> list[dict]:
     """Собирает сообщения запроса. Список классов подставляется из config/routing.yaml."""
     lines = [f"- {name}: {rule.get('описание', '')}"
              for name, rule in classifiable(intents).items()]
     return [
-        {"role": "system", "content": SYSTEM.format(intents="\n".join(lines),
-                                                    stand_facts=stand_facts(stand))},
+        {"role": "system", "content": SYSTEM.format(
+            intents="\n".join(lines), stand_facts=stand_facts(stand, cfg))},
         {"role": "user", "content": USER.format(question=question, task_file=task_file)},
     ]
 

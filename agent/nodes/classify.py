@@ -34,7 +34,8 @@ def classify(state: AgentState, deps: Deps) -> dict:
     with trace.step("classify", role="M_fast"):
         resp = deps.client.chat(
             "M_fast",
-            prompt.build_messages(state.question, state.task_file, intents, cfg.stand),
+            prompt.build_messages(state.question, state.task_file, intents,
+                                  cfg.stand, cfg),
             purpose="intent+entities",
             json_schema=prompt.schema_for(intents),
             schema_name="intent_extraction",

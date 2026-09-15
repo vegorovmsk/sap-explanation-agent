@@ -425,6 +425,53 @@ def main() -> int:
     check("склеенный вопрос — обычная строка, проходящая входной шлюз",
           isinstance(merged, str))
 
+    print("\nВ промптах нет значений наблюдаемой системы")
+    # Промпт с настоящей координатой подталкивает модель процитировать её, не
+    # открывая источник. Это уже случалось: пример «[ТР-ПЕЧ-2026/02 п. 3.1]» из
+    # системного промпта дважды вернулся в ответ как настоящая ссылка — при том,
+    # что регламент в тех прогонах не открывали. Тогда координату убрали из
+    # одного промпта и не проверили остальные; она нашлась ещё в четырёх местах.
+    #
+    # Проверка смотрит ровно тот текст, который уходит модели: докстринги и
+    # комментарии исключены, в них разбор прошлых ошибок как раз уместен.
+    import ast as _ast, re as _re                                # noqa: E402
+    from pathlib import Path as _P                               # noqa: E402
+
+    def _prompt_text(path: _P) -> str:
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        docs = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.Module, _ast.FunctionDef,
+                                 _ast.AsyncFunctionDef, _ast.ClassDef)):
+                doc = _ast.get_docstring(node, clean=False)
+                if doc:
+                    docs.add(doc)
+        return "\n".join(n.value for n in _ast.walk(tree)
+                         if isinstance(n, _ast.Constant)
+                         and isinstance(n.value, str) and n.value not in docs)
+
+    STAND_VALUES = {
+        "координата пункта регламента": r"ТР-[А-ЯЁ]{3}[^»\"',)]*п\.\s*\d",
+        "код линии": r"\b(?:ЛЭ|ЛП|ЛК)\d\b",
+        "номер заказа": r"\bZ-\d{4}\b|\b[AB]-\d{4}\b",
+        "вид печати": r"Флексо-\d",
+        "вид или тип оболочки": r"Демолон|Синтекс|Сарделон",
+        "номер таблицы НСИ": r"табл\w*\.?\s*\d+",
+        "цвет оболочки": r"Обсидиан|Индиго|Фуксия|Лимонн",
+        "служебный год": r"\b20(?:70|99)\b",
+    }
+    root = _P(__file__).resolve().parent.parent
+    checked = sorted(list((root / "agent" / "prompts").glob("*.py"))
+                     + [root / "tools" / "schemas.py"])
+    check("есть что проверять", len(checked) >= 8, f"{len(checked)} файлов")
+    for kind, pattern in STAND_VALUES.items():
+        guilty = []
+        for f in checked:
+            hits = sorted(set(_re.findall(pattern, _prompt_text(f), _re.I)))
+            if hits:
+                guilty.append(f"{f.name}: {hits[:3]}")
+        check(f"в промптах нет значений «{kind}»", not guilty, "; ".join(guilty))
+
     print("\nСостояние агента")
     st = AgentState(required_sources=["plan", "nsi", "code"])
     st.add_evidence(Evidence(claim="заказ на ЛП1", source="plan", locator="Все_ПП, строка 42"))
